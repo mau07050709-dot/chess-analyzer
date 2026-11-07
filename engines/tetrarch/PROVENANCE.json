@@ -1,0 +1,10 @@
+{
+  "name": "Tetrarch",
+  "version": "8, snapshot a06b12f4a9e2eb50987d3f016a5f92a4527c78d8",
+  "source": "https://github.com/IchNukeDichWeg/Tetrarch",
+  "license": "MIT",
+  "network": "nets/net-ffa1.nnue from the same snapshot",
+  "compiler": "Zig 0.13.0, x86_64-windows-gnu, -O3 -shared -std=c11, baseline CPU",
+  "local_change": "windows_clock.h maps benchmark-only clock_gettime to QueryPerformanceCounter; engine source and network unchanged",
+  "limitations": ["FFA returns one PV", "Paranoid search assumes opposing seats minimize root utility", "Upstream documented rule assumptions apply", "FEN4 cannot distinguish promoted one-point queens; use known moves to preserve them"]
+}

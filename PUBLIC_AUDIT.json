@@ -1,0 +1,13 @@
+{
+  "original_files_verified_unchanged": 100,
+  "privacy_findings": [],
+  "files": 115,
+  "bytes": 4620101,
+  "largest_file_bytes": 1976880,
+  "gui_classic_and_ffa_opened_offscreen": true,
+  "tests_passed": 102,
+  "tests_skipped_private_fixture_modules": 327,
+  "tests_failed": 0,
+  "git_initialized": false,
+  "published": false
+}
