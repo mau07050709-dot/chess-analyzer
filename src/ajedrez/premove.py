@@ -147,6 +147,14 @@ def interpret_premove(result,red,confirmed,pending=None,*,turn_known=True,orient
                         and (not turn_known or confirmed.turn!=intent.color)):
                     return evidence(None,intent,hold=True,reason='ghost_without_opponents_move')
         return evidence(result,pending.intent if pending else None)
+    if pending is not None and not result.uncertain_squares and all(
+            sum(board_from_placement(remap_recognition(result,view).piece_placement).piece_at(s)
+                !=confirmed.piece_at(s) for s in chess.SQUARES)>8
+            for view in (orientation,'black' if orientation=='white' else 'white')):
+        # A stale intent from another video/position cannot hold tracking forever.
+        # This releases the observation to the normal stable/legal tracker; it
+        # does not confirm a move or manufacture a turn.
+        return evidence(result,reason='stale_premove_context')
     roots=[]
     for color in ((confirmed.turn,) if turn_known else chess.COLORS):
         root=confirmed.copy(stack=False);root.turn=color
@@ -187,6 +195,13 @@ def interpret_premove(result,red,confirmed,pending=None,*,turn_known=True,orient
             return evidence(_interpreted(current,real),intent,squares,False,'premove_overlay',current)
         if matches:
             return evidence(None,pending.intent if pending else None,squares,True,'ambiguous_red',current)
+    # A projected piece vacates its source. Two occupied marked squares on a
+    # complete board can be annotations over a game that has advanced several
+    # plies. Let the normal stable/legal tracker reconcile the actual pieces.
+    if pending is None and not result.uncertain_squares and all(
+            board_from_placement(result.piece_placement).piece_at(sq) is not None
+            for sq in red.squares(result.orientation)):
+        return evidence(result)
     if pending or any_plausible:
         return evidence(None,pending.intent if pending else None,red.squares(orientation),True,'unresolved_red')
     return evidence(result)  # Red marks without premove/history evidence are not a blanket veto.
@@ -203,6 +218,7 @@ class PremoveMonitor:
 
     def consume(self,evidence,board,*,visual_stable):
         if evidence.epoch!=self.revision or evidence.root_fen!=board.fen():return False
+        if evidence.reason=='stale_premove_context':self.pending=None
         self.revision+=1;self._last=evidence
         key=(evidence.original.piece_placement,evidence.red_squares,evidence.intent,evidence.reason)
         if key==self._key:

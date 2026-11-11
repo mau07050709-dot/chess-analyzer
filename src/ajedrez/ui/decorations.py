@@ -2,7 +2,7 @@
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QPainter, QPixmap
 from PySide6.QtWidgets import QWidget, QVBoxLayout
-from ..paths import resource_root
+from ..paths import resource_root,user_data_dir
 
 
 class DecorativeImage(QWidget):
@@ -11,17 +11,27 @@ class DecorativeImage(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setAccessibleName('Imagen decorativa')
-        self.original=QPixmap(str(resource_root()/'assets'/'decorations'/filename))
+        self.filename=filename
         self.scaled=QPixmap()
+        self.reload_image()
+
+    def reload_image(self):
+        custom=user_data_dir()/'decorations'/self.filename
+        self.original=QPixmap(str(custom)) if custom.is_file() else QPixmap()
+        if self.original.isNull():self.original=QPixmap(str(resource_root()/'assets'/'decorations'/self.filename))
+        self._rescale();self.update()
 
     def sizeHint(self):
         return QSize(0,0)
 
     def resizeEvent(self,event):
+        self._rescale()
+        super().resizeEvent(event)
+
+    def _rescale(self):
         if not self.original.isNull() and self.width()>0 and self.height()>0:
             self.scaled=self.original.scaled(self.size(),Qt.AspectRatioMode.KeepAspectRatio,
                                              Qt.TransformationMode.SmoothTransformation)
-        super().resizeEvent(event)
 
     def paintEvent(self,event):
         if not self.scaled.isNull():

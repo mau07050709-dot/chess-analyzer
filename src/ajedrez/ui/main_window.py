@@ -38,12 +38,15 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QVBoxLayout,
     QWidget,
+    QToolButton,
+    QMenu,
+    QWidgetAction,
 )
 
 from ..engine import AnalysisLine, AnalysisResult, UCIEngineSession, analyze_position, find_engine
 from ..capture.screen_capture import ScreenFrame, capture_screen, crop_region
 from ..capture.live_input import left_mouse_button_down
-from ..capture.board_region import background_colors, grid_score
+from ..capture.board_region import background_colors, grid_score, fitted_grid
 from ..capture.window_anchor import WindowAnchor, physical_bounds, to_physical, to_logical
 from .capture_region_worker import RegionSearchWorker
 from .vulnerability_worker import VulnerabilityWorker
@@ -62,7 +65,7 @@ from ..game_analysis import (
     analyze_game,
 )
 from .board_widget import BoardWidget
-from .analysis_controls import EvaluationBar, BoardEvaluationPanel, analysis_position
+from .analysis_controls import EvaluationBar, BoardEvaluationPanel, analysis_position, POSITION_PROFILES, PROFILE_DEPTHS
 from .capture_dialog import CapturePreviewDialog, RecognitionReviewDialog, RegionSelector
 from .game_report_dialog import ClassificationSettingsDialog, GameReportDialog
 from .theme import install_theme
@@ -195,6 +198,12 @@ class PositionRecognitionWorker(QThread):
 
     def run(self) -> None:
         try:
+            # Calibrate the grid and inspect all visual evidence in the same coordinates.
+            self.overlay_image_size = self.image.size()
+            fitted = fitted_grid(self.image)
+            self.overlay_grid_rect = fitted if fitted is not None else self.image.rect()
+            if fitted != self.image.rect():
+                self.image = self.image.copy(fitted)
             result = (recognize_position_auto_orientation(self.image)
                       if self.orientation == "auto"
                       else recognize_position(self.image, self.orientation))
@@ -207,7 +216,7 @@ class PositionRecognitionWorker(QThread):
                     t.image_prepare_ms, t.board_split_ms,
                     t.inference_ms, t.reconstruction_ms,
                 )
-            if self.recover_turn and result.piece_placement != self.known_placement:
+            if self.recover_turn:
                 started=time.perf_counter()
                 try:
                     self.last_move_highlight=detect_highlights(self.image)
@@ -402,6 +411,7 @@ class MainWindow(QMainWindow):
         self._live_anchor = None
         self._live_window_geometry = None
         self._live_region_colors = None
+        self._live_search_area = None
         self._live_region_valid = True
         self._live_region_worker = None
         self._live_region_retry_at = 0.
@@ -415,6 +425,11 @@ class MainWindow(QMainWindow):
         self._last_live_frame_id=-1
         self._live_game_epoch=0
         self._live_tracker: LiveBoardTracker | None = None
+        self._exploring_live=False
+        self._exploration_board=None
+        self._exploration_history=[]
+        self._exploration_index=0
+        self._exploration_base_fen=None
         self._live_monitoring = False
         self._live_paused = False
         self._live_setup_pending = False
@@ -593,8 +608,8 @@ class MainWindow(QMainWindow):
         self.pgn_next_button = QPushButton("Siguiente >")
         self.pgn_end_button = QPushButton("Final")
         self.pgn_start_button.clicked.connect(lambda: self._navigate_pgn(0))
-        self.pgn_prev_button.clicked.connect(lambda: self._navigate_pgn(self._pgn_ply - 1))
-        self.pgn_next_button.clicked.connect(lambda: self._navigate_pgn(self._pgn_ply + 1))
+        self.pgn_prev_button.clicked.connect(lambda: self._step_calculation_or_pgn(-1))
+        self.pgn_next_button.clicked.connect(lambda: self._step_calculation_or_pgn(1))
         self.pgn_end_button.clicked.connect(lambda: self._navigate_pgn(self._pgn_game.move_count if self._pgn_game else 0))
         self.pgn_move_label = QLabel("Sin jugada seleccionada")
         self.pgn_move_label.setObjectName("muted")
@@ -603,6 +618,8 @@ class MainWindow(QMainWindow):
             navigation_row.addWidget(button)
         navigation_row.addWidget(self.pgn_move_label, 1)
         outer.addLayout(navigation_row)
+        self.visual_options_row=QHBoxLayout()
+        outer.addLayout(self.visual_options_row)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.main_splitter = splitter
@@ -620,6 +637,27 @@ class MainWindow(QMainWindow):
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(16, 0, 0, 0)
         panel_layout.setSpacing(12)
+
+        self.return_to_game_button=QPushButton('Volver a la posición del juego')
+        self.return_to_game_button.setObjectName('primaryButton')
+        self.return_to_game_button.setMinimumHeight(max(36,self.return_to_game_button.fontMetrics().height()+16))
+        self.return_to_game_button.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Fixed)
+        self.return_to_game_button.setEnabled(False)
+        self.return_to_game_button.clicked.connect(self._return_to_game_position)
+        panel_layout.addWidget(self.return_to_game_button)
+        self.board_widget.square_clicked.connect(self._explore_live_square)
+
+        self.show_evaluation_bar_check=QCheckBox('Mostrar barra de evaluación')
+        self.show_analysis_arrows_check=QCheckBox('Mostrar flechas de evaluación')
+        for checkbox in (self.show_evaluation_bar_check,self.show_analysis_arrows_check):
+            checkbox.setChecked(True)
+            self.visual_options_row.addWidget(checkbox)
+        self.show_evaluation_bar_check.toggled.connect(self.eval_bar.setVisible)
+        self.show_analysis_arrows_check.toggled.connect(self._set_analysis_arrows_visible)
+        self.custom_images_button=QPushButton('Imágenes…')
+        self.custom_images_button.clicked.connect(self._configure_images)
+        self.visual_options_row.addWidget(self.custom_images_button)
+        self.visual_options_row.addStretch()
 
         turn_row=QHBoxLayout()
         self.turn_buttons=QButtonGroup(self)
@@ -669,7 +707,13 @@ class MainWindow(QMainWindow):
         self.depth_spin.setRange(1, 40)
         self.depth_spin.setValue(18)
         self.depth_spin.setEnabled(False)
-        self.depth_check.toggled.connect(self._update_depth_controls)
+        self.depth_check.toggled.connect(self._depth_check_changed)
+        self.depth_profile = QComboBox()
+        for label, key, _ in POSITION_PROFILES:
+            self.depth_profile.addItem(label, key)
+        self.depth_profile.setToolTip('Límite por posición. Los perfiles de partida completa se ajustan por separado.')
+        self.depth_profile.currentIndexChanged.connect(self._position_profile_changed)
+        panel_layout.addWidget(self.depth_profile)
         depth_row.addWidget(self.depth_check)
         depth_row.addWidget(self.depth_spin)
         depth_row.addStretch(1)
@@ -735,6 +779,10 @@ class MainWindow(QMainWindow):
         self.mode_tabs.addTab(root, "Ajedrez clásico")
         self.four_player_tab = FourPlayerTab()
         self.mode_tabs.addTab(self.four_player_tab, "4 jugadores · FFA")
+        from .overlay import OverlayTab
+        self.overlay_tab = OverlayTab(self)
+        self.mode_tabs.addTab(self.overlay_tab, "Análisis Overlay")
+        self.mode_tabs.currentChanged.connect(lambda _: self.overlay_tab.activate(self.mode_tabs.currentWidget() is self.overlay_tab))
         self.setCentralWidget(self.mode_tabs)
         self._adapt_layout()
 
@@ -769,13 +817,104 @@ class MainWindow(QMainWindow):
         self._adapt_layout()
 
     def _effective_analysis_board(self,board=None):
-        return analysis_position(self.board_widget.board if board is None else board,self._analysis_turn)
+        return analysis_position(self.board_widget.board if board is None else board,
+                                 None if self._exploring_live else self._analysis_turn)
+
+    def _configure_images(self):
+        from .image_settings import ImageSettingsDialog
+        dialog=ImageSettingsDialog(self.board_panel,self)
+        dialog.exec()
+
+    def _explore_live_square(self,square):
+        if not self._live_monitoring or self._live_tracker is None:return
+        board=(self._exploration_board.copy(stack=True) if self._exploring_live
+               else self._effective_analysis_board())
+        origin=self.board_widget.selected_square
+        piece=board.piece_at(square)
+        if origin is None or (piece and piece.color==board.turn):
+            self.board_widget.selected_square=square if piece and piece.color==board.turn else None
+            self.board_widget.update();return
+        candidates=[move for move in board.legal_moves if move.from_square==origin and move.to_square==square]
+        if not candidates:return
+        move=candidates[0]
+        if any(m.promotion for m in candidates):
+            names={'Dama':chess.QUEEN,'Torre':chess.ROOK,'Alfil':chess.BISHOP,'Caballo':chess.KNIGHT}
+            name,ok=QInputDialog.getItem(self,'Promoción','Elige una pieza:',list(names),0,False)
+            if not ok:return
+            move=next(m for m in candidates if m.promotion==names[name])
+        if not self._exploring_live:
+            self._exploration_base_fen=self._live_tracker.board.fen()
+            self._exploration_history=[board.copy(stack=True)]
+            self._exploration_index=0
+        self._exploring_live=True
+        board.push(move)
+        self._exploration_history=self._exploration_history[:self._exploration_index+1]
+        self._exploration_history.append(board.copy(stack=True))
+        self._exploration_index+=1
+        self._show_exploration_position(board)
+
+    def _update_exploration_navigation(self):
+        if self._live_monitoring:
+            active=self._exploring_live and bool(self._exploration_history)
+            self.pgn_prev_button.setEnabled(active and self._exploration_index>0)
+            self.pgn_next_button.setEnabled(active and self._exploration_index<len(self._exploration_history)-1)
+            self.pgn_start_button.setEnabled(False);self.pgn_end_button.setEnabled(False)
+        elif self._pgn_game is None:
+            self.pgn_prev_button.setEnabled(False);self.pgn_next_button.setEnabled(False)
+
+    def _step_calculation_or_pgn(self,direction):
+        if not self._live_monitoring:
+            self._navigate_pgn(self._pgn_ply+direction);return
+        index=self._exploration_index+direction
+        if not self._exploring_live or not 0<=index<len(self._exploration_history):return
+        self._exploration_index=index
+        self._show_exploration_position(self._exploration_history[index].copy(stack=True))
+
+    def _show_exploration_position(self,board):
+        self._exploration_board=board.copy(stack=True)
+        self._invalidate_live_game_search('exploración temporal')
+        self._invalidate_analysis_for_position()
+        self._live_position_revision+=1
+        self._live_displayed_lines=()
+        self._clear_vulnerability_badges();self._clear_pin_badges()
+        self.board_widget.selected_square=None
+        self.board_widget.set_premove_squares(())
+        self.board_widget.set_board(board);self.board_widget.set_best_moves(())
+        self.board_widget.set_review_marker(None)
+        self.fen_edit.setText(board.fen())
+        self.return_to_game_button.setEnabled(True)
+        self._update_exploration_navigation()
+        self.pgn_move_label.setText(f'Exploración temporal · {self._exploration_index}/{len(self._exploration_history)-1} · la lectura del juego sigue activa')
+        self.pgn_turn_label.setText("Turno: "+('Blancas' if board.turn else 'Negras'))
+        self._request_live_analysis(board)
+
+    def _return_to_game_position(self):
+        if not self._live_monitoring or self._live_tracker is None:return
+        self._exploring_live=False;self._exploration_base_fen=None
+        self._exploration_board=None
+        self._live_position_revision+=1
+        self._invalidate_analysis_for_position()
+        self._apply_live_position(self._live_tracker.board.copy(stack=True),'posición del juego restaurada.',
+                                  turn_known=self._live_tracker.turn_known)
+
+    def _set_analysis_arrows_visible(self,visible):
+        self.board_widget.analysis_arrows_visible=visible
+        self.board_widget.update()
 
     def _analysis_turn_selected(self,selection):
         turn={0:None,1:chess.WHITE,2:chess.BLACK}[selection]
         if turn==self._analysis_turn:
             return
         self._analysis_turn=turn
+        if self._exploring_live and turn is not None:
+            branch=analysis_position(self._exploration_board,turn)
+            self._exploration_board=branch
+            self._exploration_history=self._exploration_history[:self._exploration_index+1]
+            self._exploration_history[self._exploration_index]=branch.copy(stack=True)
+            self._update_exploration_navigation()
+            self.board_widget.set_board(branch);self.board_widget.selected_square=None
+            self.fen_edit.setText(branch.fen())
+            self._live_position_revision+=1
         if turn is None and self._live_tracker is not None and not self._live_tracker.turn_known:
             self._highlight_turn_recovery.clear_pending()
             self._live_signature_confirmed=False
@@ -797,7 +936,7 @@ class MainWindow(QMainWindow):
             self._selector_pending=True
             return
         if self._live_monitoring and self._live_tracker is not None:
-            if self._analysis_turn is None and not self._live_tracker.turn_known:
+            if not self._exploring_live and self._analysis_turn is None and not self._live_tracker.turn_known:
                 self._apply_live_position(self._live_tracker.board.copy(stack=True),
                                           'lectura automática.',turn_known=False)
                 return
@@ -881,7 +1020,13 @@ class MainWindow(QMainWindow):
             self._live_anchor = WindowAnchor.bind(region, self._capture_screen)
             self._live_window_geometry = self._live_anchor.current() if self._live_anchor else None
             self._live_region_colors = background_colors(image)
-            self._live_region_valid = True
+            self._live_region_valid = grid_score(image,self._live_region_colors)>=.80
+            self._live_search_area = None
+            if not self._live_region_valid:
+                # A broad video selection is a viewport; keep it for subsequent searches.
+                selected = to_physical(region, self._capture_screen)
+                reference = self._live_window_geometry.client if self._live_window_geometry else None
+                self._live_search_area = (selected, reference)
             self._live_region_retry_at = 0.
             self._live_geometry_revision += 1
         self._restore_after_capture()
@@ -895,6 +1040,10 @@ class MainWindow(QMainWindow):
             self._live_signature_confirmed = False
             self.capture_status.setText("Lectura automática iniciada")
             self.live_status.setText("Reconociendo el tablero y su orientación; no hace falta confirmar la posición…")
+            self._prewarm_overlay_engine()
+            if not self._live_region_valid:
+                self._search_live_region(frame)
+                return
             self._start_recognition(image, "auto", "live_setup")
             return
         self.capture_status.setText("Vista previa disponible")
@@ -954,6 +1103,8 @@ class MainWindow(QMainWindow):
             if frame_id is not None:
                 if frame_id!=self._recognition_sequence or frame_id<=self._last_live_frame_id:return
                 self._last_live_frame_id=frame_id
+        self.overlay_tab.observe_geometry(source, context)
+        self.overlay_tab.observe_position(result, context)
         emitted = getattr(source, "completed_at", None)
         if emitted is not None:
             logger.debug("Entrega worker → interfaz: %.3f ms", (time.perf_counter()-emitted)*1000)
@@ -1013,11 +1164,13 @@ class MainWindow(QMainWindow):
                 if not self._premove.consume(premove,self._live_tracker.board,visual_stable=self._live_frame_is_stable):
                     self._live_signature_confirmed=False
                     return
-                self.board_widget.set_premove_squares(self._premove.squares)
+                if not self._exploring_live:self.board_widget.set_premove_squares(self._premove.squares)
                 logger.debug('PREMOVE estado=%s motivo=%s casillas=%s FEN real=%s',self._premove.state,premove.reason,
                              [chess.square_name(s) for s in self._premove.squares],self._live_tracker.board.fen())
                 if premove.hold:
-                    self._live_signature_confirmed=not self._premove.needs_retry
+                    # An unresolved frame is never a confirmed image-cache hit.
+                    # Keep polling even if the red overlay itself stops changing.
+                    self._live_signature_confirmed=False
                     self.live_status.setText('Premove o transición pendiente; se conservan posición, turno y análisis reales.')
                     return
                 result=premove.interpreted
@@ -1079,13 +1232,13 @@ class MainWindow(QMainWindow):
                     f"La captura sigue sin ser válida; se conserva la última posición y se reintentará. "
                     f"{update.message} Usa «Corregir posición» solo si persiste."
                 )
-            if update.status in ("unchanged","resynced"):
+            if update.status in ("unchanged","resynced","updated"):
                 self._try_highlight_turn_recovery(result,highlight)
             else:
                 self._highlight_turn_recovery.clear_pending()
             if premove is not None:
                 self._premove.after_tracking(self._live_tracker.board,visual_stable=self._live_frame_is_stable)
-                self.board_widget.set_premove_squares(self._premove.squares)
+                if not self._exploring_live:self.board_widget.set_premove_squares(self._premove.squares)
                 if self._premove.needs_retry:self._live_signature_confirmed=False
             return
         if kind in ("live_setup", "live_setup_poll") and generation != self._live_generation:
@@ -1115,10 +1268,35 @@ class MainWindow(QMainWindow):
 
     def _try_highlight_turn_recovery(self,result,highlight):
         tracker=self._live_tracker
-        if (self._analysis_turn is not None or tracker is None or tracker.turn_known
+        if (self._analysis_turn is not None or tracker is None
                 or result.uncertain_squares or result.piece_placement!=tracker.board.board_fen()
                 or not self._live_monitoring or self._live_paused):
             self._highlight_turn_recovery.clear_pending()
+            if hasattr(self,'_highlight_conflict_recovery'):self._highlight_conflict_recovery.clear_pending()
+            return
+        if tracker.turn_known:
+            from ..last_move_highlight import resolve_last_move
+            evidence=resolve_last_move(tracker.board,highlight,self._live_orientation)
+            if (evidence is None or evidence.next_turn==tracker.board.turn
+                    or not tracker.board.move_stack or self._premove.pending is not None):
+                self._highlight_turn_recovery.clear_pending()
+                if hasattr(self,'_highlight_conflict_recovery'):self._highlight_conflict_recovery.clear_pending()
+                return
+            # A stale legal reconstruction must not override a newer stable
+            # visible last move. Drop unsupported history, never fabricate it.
+            last=tracker.board.peek()
+            if (last.from_square,last.to_square)==(evidence.origin,evidence.destination):return
+            if not hasattr(self,'_highlight_conflict_recovery'):
+                self._highlight_conflict_recovery=HighlightTurnRecovery()
+            proven=self._highlight_conflict_recovery.observe(tracker.board,highlight,self._live_orientation,
+                        (self._live_generation,self._live_geometry_revision),visual_stable=self._live_frame_is_stable)
+            if proven is None:
+                self._live_signature_confirmed=False;return
+            corrected=tracker.board.copy(stack=False);corrected.turn=proven.next_turn;corrected.ep_square=None
+            if corrected.is_valid():
+                tracker.reset(corrected)
+                self._highlight_conflict_recovery.reset()
+                self._apply_live_position(corrected,'Turno corregido por última jugada resaltada estable.')
             return
         evidence=self._highlight_turn_recovery.observe(
             tracker.board,highlight,self._live_orientation,
@@ -1281,6 +1459,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _search_live_region(self, frame):
+        self.overlay_tab.invalidate()
         if self._live_region_worker is not None or time.monotonic() < self._live_region_retry_at:
             return
         self._live_region_retry_at = time.monotonic()+1.
@@ -1291,6 +1470,14 @@ class MainWindow(QMainWindow):
         for index,screen in enumerate(screens):
             bounds = physical_bounds(screen)
             search = bounds.intersected(owner) if owner is not None else bounds
+            if self._live_search_area is not None:
+                selected, reference = self._live_search_area
+                if reference is not None and owner is not None:
+                    sx, sy = owner.width()/reference.width(), owner.height()/reference.height()
+                    selected = QRect(owner.x()+round((selected.x()-reference.x())*sx),
+                                     owner.y()+round((selected.y()-reference.y())*sy),
+                                     round(selected.width()*sx), round(selected.height()*sy))
+                search = search.intersected(selected)
             if search.width()<128 or search.height()<128:
                 continue
             try:
@@ -1326,6 +1513,7 @@ class MainWindow(QMainWindow):
         region=to_logical(match.region,screen)
         if self.isVisible() and not self.isMinimized() and self.frameGeometry().intersects(region):return
         self._live_screen=screen;self._live_region=region
+        if getattr(match,'colors',None) is not None:self._live_region_colors=match.colors
         self._live_region_valid=True
         self._live_geometry_revision+=1
         self._live_recognition_geometry_revision=None
@@ -1351,12 +1539,14 @@ class MainWindow(QMainWindow):
             return
         if self._live_region_valid and self.isVisible() and not self.isMinimized() and self.frameGeometry().intersects(self._live_region):
             self._live_signature_confirmed=False
+            self.overlay_tab.invalidate()
             self.live_status.setText("El analizador se superpone a la región seleccionada; aparta o minimiza esta ventana para evitar capturar sus propias piezas y flechas.")
             logger.debug("Captura omitida: el analizador se superpone a la región %s",self._live_region)
             return
         if left_mouse_button_down():
             self._live_drag_active = True
             self._live_signature_confirmed = False
+            self.overlay_tab.invalidate()
             if self._live_tracker is not None:
                 self._live_tracker.discard_pending_candidate()
             self.live_status.setText("Arrastre detectado; se conserva la última posición confirmada.")
@@ -1368,6 +1558,9 @@ class MainWindow(QMainWindow):
         try:
             frame = capture_screen(self._live_screen)
             screen_capture_ms = (time.perf_counter() - capture_started) * 1000
+            if not self._live_region_valid:
+                self._search_live_region(frame)
+                return
             if self._live_region_colors is not None and (
                     not frame.geometry.contains(self._live_region)
                     or (not self._live_region_valid and self.isVisible() and not self.isMinimized()
@@ -1473,6 +1666,8 @@ class MainWindow(QMainWindow):
 
     def _reset_live_game(self,board,orientation,turn_known,message):
         """Reset only chess state; keep the selected screen/region and UCI worker."""
+        self._exploring_live=False;self._exploration_base_fen=None
+        self._exploration_board=None
         self._clear_premove()
         self._invalidate_live_game_search("nueva sesión de partida")
         self._live_generation+=1
@@ -1544,9 +1739,20 @@ class MainWindow(QMainWindow):
         return hashlib.blake2b(pixels, digest_size=12).digest()
 
     def _apply_live_position(self, board: chess.Board, message: str, *, turn_known: bool = True) -> None:
+        if self._exploring_live and board.fen()==self._exploration_base_fen:
+            self.board_widget.set_orientation(self._live_orientation)
+            return
+        self._exploring_live=False;self._exploration_base_fen=None
+        self._exploration_board=None
+        self.board_widget.selected_square=None
+        self._exploration_history=[];self._exploration_index=0
+        self._update_exploration_navigation()
+        self.board_widget.movable=self._live_monitoring
+        self.return_to_game_button.setEnabled(False)
         if turn_known and self._live_monitoring:
             self._highlight_turn_recovery.remember_known(board)
         if board.fen() != self._live_position_fen:
+            self.overlay_tab.invalidate()
             self._live_position_revision += 1
             self._live_position_fen = board.fen()
             self._live_engine_retries = 0
@@ -1662,8 +1868,9 @@ class MainWindow(QMainWindow):
             self._live_timer.start(self.live_interval_spin.value())
 
     def _request_live_analysis(self, board: chess.Board) -> None:
+        if self._exploring_live and board.fen()!=self.board_widget.board.fen():return
         board = self._effective_analysis_board(board)
-        self.board_widget.analysis_turn = self._analysis_turn
+        self.board_widget.analysis_turn = None if self._exploring_live else self._analysis_turn
         if self._live_analysis_cache_key and self._live_analysis_cache_key[0]!=board.fen():
             self._live_displayed_lines=()
             self.board_widget.set_best_moves(())
@@ -1674,12 +1881,17 @@ class MainWindow(QMainWindow):
             self.message_label.setText(str(exc))
             return
         mode = self.game_mode_combo.currentData()
-        depth = self.depth_spin.value() if (mode == "deep" if self._live_monitoring else self.depth_check.isChecked()) else None
-        seconds = self.time_spin.value()
+        depth = self._position_depth()
+        seconds = self.time_spin.value() if depth is None else 1.5
         # Keep five alternatives in the live view; Stockfish streams their
         # current-depth lines progressively from one MultiPV search.
         multipv = 5 if self._live_monitoring else self.multipv_spin.value()
         cache_key = (board.fen(), engine_path, round(seconds, 3), depth, multipv, mode, 4, 256)
+        ticket = self._live_search_ticket
+        if (ticket is not None and not self._live_search_finalized and ticket.cache_key == cache_key
+                and ticket.position_id == (self._live_generation,self._live_position_revision)
+                and ticket.source is self.live_analysis_worker and ticket.source.isRunning()):
+            return
         self._live_analysis_cache_key = cache_key
         cached = self._live_analysis_cache.get(cache_key)
         if not self._live_displayed_lines:
@@ -1700,6 +1912,14 @@ class MainWindow(QMainWindow):
             self.message_label.setText("La posición ya tenía un análisis completo con estos ajustes.")
             self.stop_button.setEnabled(False)
             return
+        worker = self._ensure_live_analysis_worker(engine_path, multipv)
+        request_id = worker.request_position(board.fen(), seconds, depth,game_epoch=self._live_game_epoch)
+        self._bind_live_search(board.fen(),request_id,worker,cache_key)
+        self.stop_button.setEnabled(True)
+        self.engine_status.setText("Stockfish conectado · analizando posición detectada")
+        self.message_label.setText("La posición cambió; se está analizando en segundo plano.")
+
+    def _ensure_live_analysis_worker(self, engine_path, multipv):
         worker_key = (engine_path, multipv)
         worker = self.live_analysis_worker
         if worker is None or self._live_analysis_worker_key != worker_key or not worker.isRunning():
@@ -1723,11 +1943,15 @@ class MainWindow(QMainWindow):
             )
             worker.finished.connect(lambda source=worker: self._live_analysis_finished(source))
             worker.start()
-        request_id = worker.request_position(board.fen(), seconds, depth,game_epoch=self._live_game_epoch)
-        self._bind_live_search(board.fen(),request_id,worker,cache_key)
-        self.stop_button.setEnabled(True)
-        self.engine_status.setText("Stockfish conectado · analizando posición detectada")
-        self.message_label.setText("La posición cambió; se está analizando en segundo plano.")
+        return worker
+
+    def _prewarm_overlay_engine(self):
+        if not self.overlay_tab.timer.isActive() or (self.worker and self.worker.isRunning()):
+            return
+        try:
+            self._ensure_live_analysis_worker(find_engine(self.engine_path), 5)
+        except FileNotFoundError:
+            pass  # The normal position request reports a missing engine.
 
     def _bind_live_search(self,fen,request_id,source,cache_key=None):
         self._live_analysis_request_id=request_id
@@ -1887,6 +2111,10 @@ class MainWindow(QMainWindow):
                 self._request_live_analysis(self._live_tracker.board.copy(stack=True))
 
     def _stop_live_reading(self) -> None:
+        self._exploring_live=False;self._exploration_base_fen=None
+        self._exploration_board=None
+        self.board_widget.movable=False;self.board_widget.selected_square=None
+        self.return_to_game_button.setEnabled(False)
         self._clear_premove()
         self._clear_vulnerability_badges()
         self._clear_pin_badges()
@@ -1896,6 +2124,8 @@ class MainWindow(QMainWindow):
         self._live_generation += 1
         self._live_timer.stop()
         self._live_monitoring = False
+        self._exploration_history=[];self._exploration_index=0
+        self._update_exploration_navigation()
         self._live_paused = False
         self._live_setup_pending = False
         self._live_review_pending = False
@@ -2102,9 +2332,23 @@ class MainWindow(QMainWindow):
                 f"{values.inaccuracy_max / 100:.2f} / {values.error_max / 100:.2f} peones."
             )
 
+    def _position_depth(self):
+        profile = self.depth_profile.currentData()
+        return self.depth_spin.value() if profile == 'custom' else PROFILE_DEPTHS[profile]
+
+    def _position_profile_changed(self, *_args):
+        from PySide6.QtCore import QSignalBlocker
+        with QSignalBlocker(self.depth_check):
+            self.depth_check.setChecked(self.depth_profile.currentData() != 'time')
+        self._update_depth_controls()
+
+    def _depth_check_changed(self, checked):
+        self.depth_profile.setCurrentIndex(self.depth_profile.findData('custom' if checked else 'time'))
+        self._update_depth_controls()
+
     def _update_depth_controls(self, *_args) -> None:
         batch_deep = getattr(self, "game_mode_combo", None) is not None and self.game_mode_combo.currentData() == "deep"
-        self.depth_spin.setEnabled(self.depth_check.isChecked() or batch_deep)
+        self.depth_spin.setEnabled(self.depth_profile.currentData() == 'custom' or batch_deep)
 
     def _game_analysis_progress(self, done: int, total: int, generation: int) -> None:
         if generation != self._game_analysis_generation:
@@ -2217,6 +2461,7 @@ class MainWindow(QMainWindow):
             self._navigate_pgn(row, update_list=False)
 
     def _navigate_pgn(self, ply: int, update_list: bool = True) -> None:
+        if self._live_monitoring:return
         if self._pgn_game is None:
             return
         ply = max(0, min(ply, self._pgn_game.move_count))
@@ -2287,7 +2532,7 @@ class MainWindow(QMainWindow):
             self.message_label.setText(str(exc))
             return
 
-        if self._live_monitoring and self._analysis_turn is not None:
+        if self._live_monitoring and (self._exploring_live or self._analysis_turn is not None):
             self._request_live_analysis(self.board_widget.board)
             return
         if self._live_monitoring:
@@ -2307,7 +2552,7 @@ class MainWindow(QMainWindow):
             self._request_live_analysis(board)
             return
 
-        depth = self.depth_spin.value() if self.depth_check.isChecked() else None
+        depth = self._position_depth()
 
         self.board_widget.set_position(board.fen())
         self.board_widget.set_best_move(None)
@@ -2385,6 +2630,8 @@ class MainWindow(QMainWindow):
             pv = " ".join(line.pv_san) or "sin variante"
             rendered.append(f"{line.index}. {score}\n   {pv}")
         self.variants_view.setPlainText("\n\n".join(rendered))
+        if self.overlay_tab.timer.isActive():
+            self.overlay_tab.sync()
 
     def _analysis_completed(self, result: AnalysisResult, cancelled: bool, generation: int | None = None) -> None:
         if generation is not None and generation != self._analysis_generation:
@@ -2428,6 +2675,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._start_analysis)
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt API name)
+        self.overlay_tab.shutdown()
         self.four_player_tab.shutdown()
         self._closed = True
         self._clear_premove()

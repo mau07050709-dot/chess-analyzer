@@ -30,7 +30,7 @@ def _yellow(samples):
     return (hue>=45)&(hue<=78)&(saturation>=.28)&(maximum>=110)
 
 
-def _highlight_candidates(image, inset=1):
+def _highlight_candidates(image, inset=1, *, turquoise=False):
     """Measure full-square yellow backgrounds, tolerating glyphs/JPEG.
 
     Four small corner patches avoid piece centers and legal-move dots. At
@@ -49,7 +49,11 @@ def _highlight_candidates(image, inset=1):
              for dy in (0,1) for dx in (0,1)]
     oy,ox=np.asarray(offsets).T
     patches=pixels[rows.reshape(64,1)*20+oy,cols.reshape(64,1)*20+ox].reshape(64,4,4,3)
-    flags=_yellow(patches)
+    if turquoise:
+        r, g, b = np.moveaxis(patches.astype(np.int16), -1, 0)
+        flags = (g >= 145) & (g-r >= 42) & (b-r >= 30) & (abs(g-b) <= 49)
+    else:
+        flags = _yellow(patches)
     strengths=(np.count_nonzero(flags.mean(axis=2)>=.75,axis=1)>=3)&(flags.mean(axis=(1,2))>=.70)
     medians=np.median(patches.reshape(64,16,3),axis=1)
     parity=(rows+cols).reshape(-1)%2
@@ -104,6 +108,11 @@ def detect_turn_highlights(image, placement, orientation, ordinary_checked=False
         if (np.linalg.norm(medians[a]-medians[b])<=24
                 and min(np.linalg.norm(medians[other]-medians[a]),
                         np.linalg.norm(medians[other]-medians[b]))>=40):return pair
+    candidates = _highlight_candidates(image, inset=1, turquoise=True)
+    if candidates is not None and len(candidates[0]) == 2:
+        pair = HighlightedCells(tuple(divmod(int(i), 8) for i in candidates[0]))
+        if resolve_last_move(board, pair, orientation) is not None:
+            return pair
     return None
 
 
@@ -136,7 +145,7 @@ def resolve_last_move(board, highlights, orientation, anchor=None):
     # state. A highlight alone must not override known visual history.
     if (anchor is not None and anchor.piece_at(origin)==board.piece_at(origin)
             and anchor.piece_at(destination)==piece):return None
-    current=board.copy(stack=False);current.turn=not piece.color
+    current=board.copy(stack=False);current.turn=not piece.color;current.ep_square=None
     if not current.is_valid():return None
     previous=current.copy(stack=False);previous.turn=piece.color;previous.ep_square=None
     previous.remove_piece_at(destination);previous.set_piece_at(origin,piece)

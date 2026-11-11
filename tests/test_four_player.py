@@ -78,7 +78,8 @@ class FourPlayerTests(unittest.TestCase):
             analyze.assert_not_called()
         self.assertEqual(w.board_widget.board.fen(),before)
         self.assertEqual(w._live_generation,generation)
-        self.assertEqual(w.mode_tabs.count(),2)
+        self.assertEqual(w.mode_tabs.count(),3)
+        self.assertEqual(w.mode_tabs.tabText(2),'Análisis Overlay')
         self.assertEqual(w.four_player_tab.findChildren(QProgressBar),[])
         self.assertIn('FFA',w.four_player_tab.status.text())
 

@@ -54,12 +54,19 @@ class BoardWidget(QWidget):
         self.board = chess.Board()
         self.best_move: chess.Move | None = None
         self.analysis_moves: tuple[chess.Move, ...] = ()
+        self.analysis_arrows_visible = True
         self.review_move: chess.Move | None = None
         self.review_symbol = ""
         self.review_category = ""
         self.review_badge_visible = True
         self.orientation = "white"
         self.editable = False
+        self.movable = False
+        self.selected_square = None
+        self._pressed_square = None
+        self._press_position = None
+        self._drag_square = None
+        self._drag_position = None
         self.vulnerable_squares = frozenset()
         self.pinned_squares = frozenset()
         self.premove_squares = ()
@@ -84,6 +91,7 @@ class BoardWidget(QWidget):
     def set_board(self, board: chess.Board) -> None:
         changed = board.fen() != self.board.fen()
         if changed:
+            self._cancel_piece_drag()
             self.vulnerable_squares = frozenset()
             self.pinned_squares = frozenset()
             self.premove_squares = ()
@@ -156,6 +164,7 @@ class BoardWidget(QWidget):
         if orientation not in ("white", "black"):
             raise ValueError("La orientación debe ser 'white' o 'black'.")
         changed=self.orientation != orientation
+        if changed:self._cancel_piece_drag()
         self.orientation = orientation
         if changed:
             self._animation.stop()
@@ -239,17 +248,55 @@ class BoardWidget(QWidget):
             painter.drawPolygon(QPolygonF([QPointF(x+a*size,y+b*size) for a,b in points]))
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        if not self.editable or event.button() != Qt.MouseButton.LeftButton:
+        if not (self.editable or self.movable) or event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
+        if self.movable and not self.editable:self.setFocus(Qt.FocusReason.MouseFocusReason)
         side = min(self.width(), self.height())
         left = (self.width() - side) / 2
         top = (self.height() - side) / 2
         cell = side / 8
+        if not (left<=event.position().x()<left+side and top<=event.position().y()<top+side):return
         file_index = int((event.position().x() - left) / cell)
         row_index = int((event.position().y() - top) / cell)
         if 0 <= file_index < 8 and 0 <= row_index < 8:
             square = grid_to_square(row_index, file_index, self.orientation)
+            self._pressed_square = square
+            self._press_position = QPointF(event.position())
             self.square_clicked.emit(square)
+
+    def _cancel_piece_drag(self):
+        self._drag_square=None;self._drag_position=None
+        self._pressed_square=None;self._press_position=None
+        self.update()
+
+    def mouseMoveEvent(self,event):
+        if self.movable and not self.editable and event.buttons() & Qt.MouseButton.LeftButton:
+            origin=self._pressed_square
+            piece=self.board.piece_at(origin) if origin is not None else None
+            if (piece and piece.color==self.arrow_board().turn and self.selected_square==origin
+                    and self._press_position is not None):
+                delta=event.position()-self._press_position
+                if self._drag_square is not None or abs(delta.x())+abs(delta.y())>=QApplication.startDragDistance():
+                    self._drag_square=origin;self._drag_position=QPointF(event.position());self.update()
+        super().mouseMoveEvent(event)
+
+    def keyPressEvent(self,event):
+        if event.key()==Qt.Key.Key_Escape and self._pressed_square is not None:
+            self._cancel_piece_drag();self.selected_square=None;self.update();return
+        super().keyPressEvent(event)
+
+    def mouseReleaseEvent(self,event):
+        if self.movable and not self.editable and event.button()==Qt.MouseButton.LeftButton:
+            origin=self._pressed_square
+            self._cancel_piece_drag()
+            side=min(self.width(),self.height());left=(self.width()-side)/2;top=(self.height()-side)/2
+            x=event.position().x()-left;y=event.position().y()-top
+            if 0<=x<side and 0<=y<side:
+                square=grid_to_square(int(y/(side/8)),int(x/(side/8)),self.orientation)
+                if origin is not None and square!=origin:
+                    self.square_clicked.emit(square)
+            self._pressed_square=None
+        super().mouseReleaseEvent(event)
 
     def set_best_move(self, uci: str | None) -> None:
         try:
@@ -313,6 +360,10 @@ class BoardWidget(QWidget):
                 color = light if (rank + file_index) % 2 == 0 else dark
                 painter.fillRect(int(left + file_index * cell), int(top + rank * cell), math.ceil(cell), math.ceil(cell), color)
 
+        if self.selected_square is not None:
+            column,row=self._display_coords(self.selected_square)
+            painter.fillRect(QRectF(left+column*cell,top+row*cell,cell,cell),QColor(245,197,66,110))
+
         for square in self.premove_squares:
             column,row=self._display_coords(square)
             painter.fillRect(QRectF(left+column*cell,top+row*cell,cell,cell),QColor(180,78,47,155))
@@ -330,7 +381,7 @@ class BoardWidget(QWidget):
 
         moving_destinations = {destination for _, destination, _ in self._animated_pieces}
         for square, piece in self.board.piece_map().items():
-            if square in moving_destinations:
+            if square in moving_destinations or square==self._drag_square:
                 continue
             file_index, rank_index = self._display_coords(square)
             rect_x = left + file_index * cell
@@ -351,7 +402,7 @@ class BoardWidget(QWidget):
         order = sorted(range(len(self.analysis_moves[:5])), key=lambda i: (
             -((chess.square_file(self.analysis_moves[i].from_square)-chess.square_file(self.analysis_moves[i].to_square))**2
               +(chess.square_rank(self.analysis_moves[i].from_square)-chess.square_rank(self.analysis_moves[i].to_square))**2), i))
-        for index in order:
+        for index in order if self.analysis_arrows_visible else ():
             move = self.analysis_moves[index]
             start = self._center(move.from_square, left, top, cell)
             end = self._center(move.to_square, left, top, cell)
@@ -388,6 +439,10 @@ class BoardWidget(QWidget):
             painter.drawText(int(left + file_index * cell + 3), int(top + 7 * cell + cell * 0.78), file_name)
         self._draw_vulnerability_badges(painter, left, top, cell)
         self._draw_pin_badges(painter, left, top, cell)
+        if self._drag_square is not None and self._drag_position is not None:
+            piece=self.board.piece_at(self._drag_square)
+            if piece:self._paint_piece(painter,piece,self._drag_position.x()-cell/2,
+                                       self._drag_position.y()-cell/2,cell)
         painter.end()
 
     def _display_coords(self, square: chess.Square) -> tuple[int, int]:

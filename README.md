@@ -9,6 +9,7 @@ A Windows desktop application for local chess study, built with Python, PySide6,
 - Screen-region capture, local ONNX piece recognition, manual review and continuous legal-position tracking with orientation/turn recovery.
 - Four-player Free-for-All: cross-shaped board, Tetrarch analysis, gray-army handling and persistent color selection independent of the real turn. Choose **Mi color / Evaluar a** to analyze Red, Blue, Yellow or Green and place it below.
 - Dark theme, nonblocking workers, cancellation and stale-result rejection.
+- Classic analysis supports an overlay, configurable board visuals and exploring variations while tracking a position. Live capture includes updated board-style and last-move recognition.
 
 ## Windows setup
 

@@ -18,3 +18,13 @@ validation/
 *.pdb
 *.lib
 engines/stockfish*/
+GitHub_Public*/
+.pytest_cache/
+.vscode/
+*.tmp
+*.key
+*.pem
+*.pfx
+!/engines/tetrarch/build/
+/engines/tetrarch/build/*
+!/engines/tetrarch/build/tetrarch.dll

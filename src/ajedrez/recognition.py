@@ -326,6 +326,21 @@ def recognize_position(
         (time.perf_counter() - total_started) * 1000,
     )
     result = RecognitionResult(placement, orientation, tuple(predictions), confidence_threshold, timings)
+    if rescue_degraded and result.uncertain_squares:
+        from .theme_exemplars import classify
+        exemplars = classify(image)
+        method = 'rgb_exemplar_similarity'
+        if exemplars is None:
+            from .piece_styles import match_style
+            exemplars = match_style(image)
+            method = 'board_style_similarity'
+        if exemplars is not None:
+            predictions=tuple(SquarePrediction(grid_to_square(row,col,orientation),symbol,
+                method,similarity)
+                for (row,col),(symbol,similarity) in zip(np.ndindex(8,8),exemplars))
+            placement=placement_from_pieces({p.square:p.symbol for p in predictions})
+            return RecognitionResult(placement,orientation,predictions,confidence_threshold,
+                replace(timings,total_ms=(time.perf_counter()-total_started)*1000))
     if rescue_degraded and 0 < len(result.uncertain_squares) <= 4:
         return _rescue_degraded(image, result, path, total_started)
     return result

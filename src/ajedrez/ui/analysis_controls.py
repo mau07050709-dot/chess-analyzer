@@ -5,6 +5,16 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget,QFrame,QLabel,QVBoxLayout,QBoxLayout
 
 
+POSITION_PROFILES = (
+    ("Límite de tiempo", "time", None),
+    ("Rápido · profundidad 8", "fast", 8),
+    ("Equilibrado · profundidad 12", "balanced", 12),
+    ("Profundo · profundidad 16", "deep", 16),
+    ("Profundidad personalizada", "custom", None),
+)
+PROFILE_DEPTHS = {key: depth for _, key, depth in POSITION_PROFILES}
+
+
 def analysis_position(board: chess.Board, turn: bool | None) -> chess.Board:
     result=board.copy(stack=False)
     if turn is not None and turn != result.turn:
@@ -39,11 +49,13 @@ class EvaluationBar(QWidget):
     def setRange(self,*_args):pass
 
     def setValue(self,value):
+        self._set_segments(value)
+        self._score_text='—';self._update_label()
+
+    def _set_segments(self,value):
         self._value=max(0,min(100,int(value)))
         black,white=self.segment_fractions()
         self._layout.setStretch(0,round(black*1000));self._layout.setStretch(1,round(white*1000))
-        self._score_text='—';self._update_label()
-
     def value(self):return self._value
 
     def segment_fractions(self):
@@ -52,16 +64,16 @@ class EvaluationBar(QWidget):
 
     def set_score(self,cp=None,mate=None):
         if mate is not None:
-            self.setValue(100 if mate>0 else 0 if mate<0 else 50)
+            self._set_segments(100 if mate>0 else 0 if mate<0 else 50)
             self._score_text=f'{"+" if mate>0 else "−" if mate<0 else ""}M{abs(mate)}'
         elif cp is not None:
-            self.setValue(round(50+50*math.tanh(cp/400)))
+            self._set_segments(round(50+50*math.tanh(cp/400)))
             self._score_text=f'{cp/100:+.1f}' if cp else '0.0'
         else:self.setValue(50)
         self._update_label()
 
     def set_terminal(self,winner):
-        self.setValue(100 if winner else 0)
+        self._set_segments(100 if winner else 0)
         self._score_text='+M0' if winner else '−M0';self._update_label()
 
     def set_orientation(self,orientation):
@@ -74,7 +86,7 @@ class EvaluationBar(QWidget):
     def _update_label(self):
         white=self._value>=50
         top=white==(self.orientation=='black')
-        self.score_label.setGeometry(1,3 if top else max(3,self.height()-28),32,24)
+        self.score_label.setGeometry(1,3 if top else max(3,self.height()-28),max(1,self.width()-2),24)
         self.score_label.setStyleSheet(f'color: {self.BLACK_COLOR if white else self.WHITE_COLOR}; background: transparent; font-size: 10px; font-weight: 650;')
         self.score_label.setText(self._score_text);self.score_label.raise_()
 
