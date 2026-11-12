@@ -320,7 +320,7 @@ class OverlayTab(QWidget):
         tracker = h._live_tracker
         region = h._live_region
         eligible = (active and h._live_monitoring and not h._live_paused and not h._closed
-                    and h._live_region_valid and not h._live_drag_active and not h._exploring_live
+                    and h._live_region_valid and not h._exploring_live
                     and tracker is not None and (tracker.turn_known or h._analysis_turn is not None)
                     and region is not None and h._live_screen is not None
                     and h._live_screen.geometry().contains(region)
@@ -332,10 +332,15 @@ class OverlayTab(QWidget):
             scope = (h._live_generation, h._live_geometry_revision, board.fen(),
                      h._live_orientation, QRect(region))
             now = time.monotonic()
-            if h._live_signature_confirmed:
+            # A drag suspends capture. Keep the verified position and give
+            # the first post-release frame time to confirm it or replace it.
+            holding_verified_position = h._live_drag_active and scope == self._verified_scope
+            if h._live_signature_confirmed or holding_verified_position:
                 self._verified_scope = scope
                 self._verified_until = now + .55
-            valid = (scope == self._verified_scope and now <= self._verified_until
+            elif scope != self._verified_scope or now > self._verified_until:
+                self._verified_scope = None
+            valid = (scope == self._verified_scope
                      and h._live_analysis_cache_key and h._live_analysis_cache_key[0] == scope[2])
             if valid:
                 lines = h._live_displayed_lines[:5]

@@ -1104,7 +1104,6 @@ class MainWindow(QMainWindow):
                 if frame_id!=self._recognition_sequence or frame_id<=self._last_live_frame_id:return
                 self._last_live_frame_id=frame_id
         self.overlay_tab.observe_geometry(source, context)
-        self.overlay_tab.observe_position(result, context)
         emitted = getattr(source, "completed_at", None)
         if emitted is not None:
             logger.debug("Entrega worker → interfaz: %.3f ms", (time.perf_counter()-emitted)*1000)
@@ -1152,11 +1151,13 @@ class MainWindow(QMainWindow):
                     or self._live_tracker is None):
                 return
             if left_mouse_button_down():
+                self._live_drag_active = True
                 self._live_tracker.discard_pending_candidate()
                 self._highlight_turn_recovery.clear_pending()
                 self._live_signature_confirmed=False
                 self.live_status.setText("Arrastre en curso; se conserva la posición confirmada.")
                 return
+            self.overlay_tab.observe_position(result, context)
             if premove is not None:
                 if premove.scope!=(self._live_generation,self._live_geometry_revision):
                     self._live_signature_confirmed=False
@@ -1546,7 +1547,6 @@ class MainWindow(QMainWindow):
         if left_mouse_button_down():
             self._live_drag_active = True
             self._live_signature_confirmed = False
-            self.overlay_tab.invalidate()
             if self._live_tracker is not None:
                 self._live_tracker.discard_pending_candidate()
             self.live_status.setText("Arrastre detectado; se conserva la última posición confirmada.")
