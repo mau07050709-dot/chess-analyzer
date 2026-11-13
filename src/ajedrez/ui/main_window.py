@@ -47,6 +47,7 @@ from ..engine import AnalysisLine, AnalysisResult, UCIEngineSession, analyze_pos
 from ..capture.screen_capture import ScreenFrame, capture_screen, crop_region
 from ..capture.live_input import left_mouse_button_down
 from ..capture.board_region import background_colors, grid_score, fitted_grid
+from ..capture.move_dots import without_move_dots
 from ..capture.window_anchor import WindowAnchor, physical_bounds, to_physical, to_logical
 from .capture_region_worker import RegionSearchWorker
 from .vulnerability_worker import VulnerabilityWorker
@@ -204,9 +205,14 @@ class PositionRecognitionWorker(QThread):
             self.overlay_grid_rect = fitted if fitted is not None else self.image.rect()
             if fitted != self.image.rect():
                 self.image = self.image.copy(fitted)
-            result = (recognize_position_auto_orientation(self.image)
+            classification_image = self.image
+            if self.premove_snapshot is not None and self.orientation != "auto":
+                board, _, turn_known, _, _, _ = self.premove_snapshot
+                if turn_known:
+                    classification_image = without_move_dots(self.image, board, self.orientation)
+            result = (recognize_position_auto_orientation(classification_image)
                       if self.orientation == "auto"
-                      else recognize_position(self.image, self.orientation))
+                      else recognize_position(classification_image, self.orientation))
             if result.timings:
                 t = result.timings
                 logger.info(
