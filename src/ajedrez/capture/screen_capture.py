@@ -1,13 +1,20 @@
-"""Screen snapshot and region-cropping helpers backed by Qt's QScreen API."""
+"""Screen snapshot and region-cropping helpers in Qt logical coordinates."""
 from __future__ import annotations
 
+import logging
+import sys
 from dataclasses import dataclass
 
 from PySide6.QtCore import QRect, QRectF
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QGuiApplication, QImage
+
+
+from .window_anchor import physical_bounds
+from .windows_pixels import grab_desktop_pixels
 
 
 MIN_REGION_SIZE = 32
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -23,6 +30,15 @@ class ScreenFrame:
 def capture_screen(screen) -> ScreenFrame:
     """Grab one monitor. The caller should hide/minimize its own window first."""
     geometry = QRect(screen.geometry())
+    if sys.platform == "win32" and QGuiApplication.platformName() == "windows":
+        try:
+            image = grab_desktop_pixels(physical_bounds(screen))
+            if not image.isNull():
+                ratio = float(screen.devicePixelRatio() or 1.0)
+                return ScreenFrame(screen.name() or "Pantalla", geometry, image, ratio)
+        except OSError:
+            logger.debug("Captura nativa no disponible. Se reintenta con Qt.", exc_info=True)
+
     pixmap = screen.grabWindow(0)
     if pixmap.isNull():
         raise RuntimeError("Windows no devolvió una imagen de esa pantalla.")

@@ -3,6 +3,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import unittest
+from unittest.mock import Mock, patch
 
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QColor, QImage, QPixmap
@@ -46,6 +47,34 @@ class ScreenCropTests(unittest.TestCase):
         self.assertEqual(clipped, QRect(100, 50, 2, 2))
         with self.assertRaisesRegex(ValueError, "al menos"):
             clamp_region(QRect(10, 10, 10, 10), QRect(0, 0, 100, 100))
+
+    def test_windows_capture_uses_physical_pixels_and_keeps_qt_origin(self):
+        screen = Mock()
+        screen.geometry.return_value = QRect(-1200, 50, 800, 600)
+        screen.devicePixelRatio.return_value = 1.5
+        screen.name.return_value = "Secundario"
+        image = QImage(1200, 900, QImage.Format.Format_RGB32)
+        with patch("ajedrez.capture.screen_capture.sys.platform", "win32"), \
+             patch("ajedrez.capture.screen_capture.QGuiApplication.platformName", return_value="windows"), \
+             patch("ajedrez.capture.screen_capture.grab_desktop_pixels", return_value=image) as native:
+            frame = capture_screen(screen)
+        native.assert_called_once_with(QRect(-1200, 50, 1200, 900))
+        screen.grabWindow.assert_not_called()
+        self.assertEqual(frame.geometry, screen.geometry())
+        self.assertEqual(frame.device_pixel_ratio, 1.5)
+        self.assertEqual(frame.image.size(), image.size())
+
+    def test_windows_capture_uses_qt_if_native_capture_fails(self):
+        screen = Mock()
+        screen.geometry.return_value = QRect(0, 0, 160, 120)
+        screen.devicePixelRatio.return_value = 1.0
+        screen.grabWindow.return_value = QPixmap.fromImage(QImage(160, 120, QImage.Format.Format_RGB32))
+        with patch("ajedrez.capture.screen_capture.sys.platform", "win32"), \
+             patch("ajedrez.capture.screen_capture.QGuiApplication.platformName", return_value="windows"), \
+             patch("ajedrez.capture.screen_capture.grab_desktop_pixels", side_effect=OSError("GDI error")):
+            frame = capture_screen(screen)
+        screen.grabWindow.assert_called_once_with(0)
+        self.assertFalse(frame.image.isNull())
 
     def test_screen_capture_wraps_a_local_qt_snapshot(self):
         class FakeScreen:
